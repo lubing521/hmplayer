@@ -58,6 +58,7 @@
 #define PARA_ASSERT_VALUE(cond,x)  {if(!cond) return x;}
 /***********************************************************************************************/
 #define DEBUG 1
+#define SAVE_DEBUG 0
 #define MSGDEBUG 1
 #define DISPLAYMSG 1
 #define OSDDEBUG 0
@@ -66,6 +67,19 @@
 /***********************************************************************************************/
 #define MSG_DISPLAY(x)  {if(DISPLAYMSG)printf x;}
 #define MSG_APP(x)  {if(MSGDEBUG)printf x ;}
+/*#define DBG_APP(x)  do { \
+						if (SAVE_DEBUG) { \
+						char cmd[1280]; \
+						va_list ap; \
+						char cstr[1024]; \
+						va_start(ap, x); \
+						vsnprintf(cstr, 1022, x, ap); \
+						va_end(ap); \
+						sprintf(cmd, "echo %s >> /mnt/system/data/hm.log", cstr); \
+						system(cmd); } \
+						else { \
+						printf x;} \
+					}while(0)*/
 #define DBG_APP(x)  {if(DEBUG)printf x ;}
 /*#define DBG_APP(x)  {if(DEBUG)nexus_debug_sock_send x ;}*/
 #define DBG_OSD(x)  {if(OSDDEBUG)printf x ;}
@@ -258,7 +272,7 @@ typedef struct av_osd_text_t
 	unsigned int compressType;
 	unsigned int picSize;
 	unsigned int picRecSize;
-	unsigned int picDisplayMode;	
+	unsigned int picDisplayMode;
 	char szContext[1024];
 	pthread_mutex_t staticLock;
 }av_osd_text;
@@ -411,6 +425,7 @@ int NEXUSAPP_GetTime(unsigned char *pOutputArray);
 void NEXUSAPP_SysTime_Setup(void);
 int NEXUSAPP_PreRecord(void);
 int NEXUSAPP_PostRecord(void);
+char * NEXUSAPP_GetVersion(void);
 
 
 /***********************************************************************************************/

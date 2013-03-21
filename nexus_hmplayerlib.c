@@ -57,6 +57,9 @@
 #include "hm_security_pub.h"
 #include <sys/stat.h>
 #include <semaphore.h>
+#if 0
+#include "sqlite3.h"
+#endif
 /************************************************************************************/
 
 #define MAINPID	"/tmp/hplayMain.pid"
@@ -78,10 +81,20 @@ ctrl_start_info lib_ctrl_sec_info;
 ctrl_start_info lib_ctrl_info;
 av_pthread_context lib_hdThreadContext = {PLAYER_PLAYPUMP_HD, NULL};
 av_pthread_context lib_sdThreadContext = {PLAYER_PLAYPUMP_SD, NULL};
-sem_t *adddisk_semid, *rmdisk_semid, *song_searched_semid;
+sem_t *adddisk_semid, *rmdisk_semid, *song_searched_semid, *song_finish_semid;
 int g_secure_pass_flag = -1;
 int g_iVersion = -1;
 extern char g_current_date[10];
+static int g_song_in_search_flag = 0;
+static int g_in_record_flag = 0;
+
+#if 0
+static sqlite3 *db;
+static char **selectResult = 0;//存储查询到的信息
+static int nResult = 0;		//行数
+static int mResult = 0;		//列数
+#endif
+
 /************************************************************************************/
 struct nexus_stream_tpye
 {
@@ -153,18 +166,25 @@ struct nexus_stream_tpye stream_type[STREAM_TYPE_MAX] =
 
 extern void NEXUS_Platform_P_SetWakeupDevices(const NEXUS_PlatformStandbySettings *pSettings);
 /************************************************************************************/
+char * NEXUSAPP_GetVersion(void)
+{
+	return HMPLAYER_VERSION;
+}
+
 int NEXUSAPP_PreRecord(void)
 {
+	g_in_record_flag = 1;
+
 	if(system("umnt=$(cat /proc/mounts|awk '{print $2}'|grep /mnt/udisk);[ ! -z $umnt ] && umount /mnt/udisk -l;"))
 	{
-		printf("umount fail\n");
+		printf("[%s]umount fail\n", __FUNCTION__);
 	}
 
 	sleep(1);
-	
+
 	if(system("mod=$(lsmod|awk '{print $1}'|grep ehci_brcm);[ ! -z $mod ] && rmmod ehci_brcm"))
 	{
-		printf("rmmod ehci_brcm fail\n");
+		printf("[%s]rmmod ehci_brcm fail\n", __FUNCTION__);
 	}
 
 	return 0;
@@ -174,16 +194,18 @@ int NEXUSAPP_PostRecord(void)
 {
 	if(system("umnt=$(cat /proc/mounts|awk '{print $2}'|grep /mnt/udisk);[ ! -z $umnt ] && umount /mnt/udisk -l;"))
 	{
-		printf("umount fail\n");
+		printf("[%s]umount fail\n", __FUNCTION__);
 	}
 
 	sleep(1);
 	
 	if(system("mod=$(lsmod|awk '{print $1}'|grep ehci_brcm);[ -z $mod ] && insmod /lib/modules/ehci-brcm.ko"))
 	{
-		printf("insmod ehci_brcm fail\n");
+		printf("[%s]insmod ehci_brcm fail\n", __FUNCTION__);
 	}
 
+	g_in_record_flag = 0;
+	
 	return 0;
 }
 int NEXUSAPP_Standby(void)
@@ -284,6 +306,11 @@ int NEXUSAPP_Find_Outside_SongDisk(void)
 		{
 			return 1;
 		}
+
+		if(0 == song_semval && 1 == adddisk_semval) /*added disk have been searched*/
+		{
+			return 2;
+		}
 	}	
 
 	return 0;
@@ -291,6 +318,8 @@ int NEXUSAPP_Find_Outside_SongDisk(void)
 
 int NEXUSAPP_Search_Songs(void)
 {	
+	g_song_in_search_flag = 1;
+	
 	if (system("killall -s KILL qtabd"))
 		printf("!!!!!kill qtabd failed\n");
 	
@@ -305,7 +334,11 @@ int NEXUSAPP_Search_Songs(void)
 	if (system("qtabd -s -d &"))
 		printf("!!!!!restart qtabd failed\n");
 
-	sleep(10);
+	sem_wait(song_finish_semid);
+
+	g_song_in_search_flag = 0;
+
+	sleep(1);
 	
 	return 0;
 }
@@ -318,9 +351,12 @@ int NEXUSAPP_Check_Song_Disk_Detach(void)
 	{
 		/*printf("[%s-%d]adddisk_semval:%d, song_semval:%d, rmdisk_semval:%d\n", __FUNCTION__, __LINE__, adddisk_semval, song_semval, rmdisk_semval);*/
 		
-		if(0 == song_semval && 0 == rmdisk_semval) /*song searched && remove disk*/
+		if(0 == song_semval && 0 == rmdisk_semval && !g_in_record_flag) /*song searched && remove disk*/
 		{
-			return 1;
+			if (!g_song_in_search_flag)
+			{
+				return 1;
+			}
 		}
 	}
 
@@ -351,7 +387,6 @@ void my_trace(char *buf, int iLen ,char *filename)
 		DBG_APP(("open file error!\n"));
 		return ;
 	}
-
 
 	fwrite(buf,1,iLen,fp);
 	fclose(fp);
@@ -1557,7 +1592,7 @@ static int NEXUSAPP_Playpump_CSong(av_player *player , av_stream_info *stream_in
 	memset(szFileName,0x00,sizeof(szFileName));
 
 	player->uiDisplay3DMode = SURFACE_OSD_MODE_2D;
-	
+
 	if((ptr = strstr(stream_info->szSongName,"/mnt/mb/"))!=NULL)
 	{				
 		ptr += strlen("/mnt/mb/");
@@ -1584,6 +1619,46 @@ static int NEXUSAPP_Playpump_CSong(av_player *player , av_stream_info *stream_in
 		}
 #endif
 
+		if(access(stream_info->szSongName, F_OK))
+		{
+			DBG_APP(("[%s-%d]file not exist\n", __FUNCTION__, __LINE__));
+			goto check_song_error_out;
+		}
+
+		player->myIo = nexusio_mftp_prtocol_get();
+
+		if(player->myIo == NULL)
+		{
+			DBG_APP(("Playpump CSong io null\n"));
+			goto check_song_error_out;
+		}
+		
+		player->ioContext.fullname = malloc(strlen(stream_info->szSongName));
+		memset(player->ioContext.fullname, 0, sizeof(player->ioContext.fullname));
+		strcpy(player->ioContext.fullname, stream_info->szSongName);
+
+		player->ioContext.filename= malloc(4);
+		memset(player->ioContext.filename, 0, 4);		
+		strcpy(player->ioContext.filename, "mpg");
+		/*printf("[%s-%d]filename:%s, fullname:%s\n", __FUNCTION__, __LINE__, player->ioContext.filename, player->ioContext.fullname);*/
+		iRet = 0;
+	}
+	else if((ptr = strstr(stream_info->szSongName,"/a/"))!=NULL)
+	{
+		ptr += strlen("/a/");
+
+		if (NULL == ptr)
+		{
+			DBG_APP(("[%s-%d]ptr null\n", __FUNCTION__, __LINE__));
+			goto check_song_error_out;
+		}
+
+		if(access(stream_info->szSongName, F_OK))
+		{
+			DBG_APP(("[%s-%d]file not exist\n", __FUNCTION__, __LINE__));
+			goto check_song_error_out;
+		}
+				
 		player->myIo = nexusio_mftp_prtocol_get();
 
 		if(player->myIo == NULL)
@@ -1602,6 +1677,7 @@ static int NEXUSAPP_Playpump_CSong(av_player *player , av_stream_info *stream_in
 		strcpy(player->ioContext.filename, "mpg");
 		/*printf("[%s-%d]filename:%s, fullname:%s\n", __FUNCTION__, __LINE__, player->ioContext.filename, player->ioContext.fullname);*/
 		iRet = 0;
+		
 	}
 	else if(strstr(stream_info->szSongName,"#"))
 	{
@@ -2304,8 +2380,13 @@ static int NEXUSAPP_Playback_Start(av_pthread_context *av,av_player *player ,av_
 	/* reset audiomode on start play ,accept audiomode set first*/
 	player->audiomode = -1;
 
-	NEXUS_Playback_Start(playback, file, NULL);
-	
+	rc = NEXUS_Playback_Start(playback, file, NULL);
+	if(rc)
+	{
+		printf("[%s-%d]play error\n", __FUNCTION__, __LINE__);
+		return 0;
+	}
+
 	NEXUSAPP_Playpump_Static_Set(av->avp, player->playerId, PLAYER_CTRL_PLAY);
 
 	playerPrevState = player->state;
@@ -2416,7 +2497,11 @@ static void *NEXUSAPP_Start_Hd_Pthread(void *context)
 			ptr = strstr(player->ioContext.fullname, "AS");
 
 			if (!ptr)
+			{
 				ptr = strstr(player->ioContext.fullname, "/tmp/1.mpg");
+				if (!ptr)
+					ptr = strstr(player->ioContext.fullname, "/a/");
+			}
 		}
 		
 		MSG_APP(("\n\nstart playpump [%d]:  start  %s playpump pthread! \n",av->playpumpID,av->playpumpID?"[SD]" : "[HD]"));
@@ -2462,195 +2547,6 @@ static void *NEXUSAPP_Start_Hd_Pthread(void *context)
 		
 }
 
-/*************************************************
-  Function:    	NEXUSAPP_Start_Sd_Pthread
-  Description:	SD thread 
-  Input:		1 . void *context		:  thread  input parameters  struct 
-  Output:		
-  Return:
-  other : 		SD thread must be sleep until Hd thread start to play media stream
-*************************************************/
-static void *NEXUSAPP_Start_Sd_Pthread(void *context)
-{
-	av_player *player ;
-	av_stream_info  stream_info;
-	av_pthread_context *av =  (av_pthread_context *)context;
-	unsigned int last_video_pid = 0, last_transport_type = 0, last_video_codec = 0;
-	NEXUS_PlaypumpOpenPidChannelSettings settings;
-	NEXUS_Error rc;
-	char *ptr = NULL;
-	struct util_opts_t opts;
-
-	signal(SIGNAL_EXIT, NEXUSAPP_Signal_Exit);
-	
-	player = &av->avp->sdPlayer;
-	player->playerId = av->playpumpID;
-
-	memset(&stream_info,0x00,sizeof(stream_info));
-
-#ifdef HDSD_TRANSPORT_TCP	
-	socket_t socket_info;
-	memset(&socket_info,0,sizeof(socket_t));
-	socket_tcp_server_init(&socket_info,SD_PLAYER_PORT);
-#else
-	unixsock socket_info;
-	memset(&socket_info,0,sizeof(unixsock));
-	strcpy(socket_info.szName , USOCK_SD_NAME);
-	socket_unix_server_init(&socket_info);
-#endif
-
-
-	DBG_APP(("\n\nstart playpump [%d]:  start  %s playpump pthread! \n",av->playpumpID,av->playpumpID?"[SD]" : "[HD]"));
-	NEXUSAPP_Playpump_Prepare(av,player,(void *)&socket_info,&stream_info);
-	NEXUSAPP_Playpump_Start(av,player,&stream_info);
-	last_video_pid = player->videoPidChannel.pid;
-	last_transport_type = player->transportType;
-	last_video_codec = player->videoProgram.codec;
-	NEXUSAPP_Playpump_Play(av,player);
-
-	while(1)
-	{
-		DBG_APP(("\n\nstart playpump [%d]:  start  %s playpump pthread! \n",av->playpumpID,av->playpumpID?"[SD]" : "[HD]"));
-		NEXUSAPP_Playpump_Prepare(av,player,(void *)&socket_info,&stream_info);
-
-		DBG_APP(("fullname:%s, display mode:%d\n", player->ioContext.fullname, av->avp->display.mode));
-
-		if (player->playpump == NULL)
-		{
-			NEXUSAPP_Playpump_Start(av,player,&stream_info);
-			last_video_pid = player->videoPidChannel.pid;
-			last_transport_type = player->transportType;
-			last_video_codec = player->videoProgram.codec;
-			NEXUSAPP_Playpump_Play(av,player);
-			continue;
-		}
-
-		if (player->ioContext.fullname)
-		{
-			ptr = strstr(player->ioContext.fullname, "AS");
-			if (ptr)
-			{	
-				NEXUSAPP_Util_Opts_Init(&opts);
-				opts.filename = player->ioContext.fullname;
-				if (cmdline_probe(&opts.common, opts.filename, &opts.indexname))
-				{
-					DBG_APP(("!!!!!!!!!!![%s-%d]file:%s probe failed\n", __FUNCTION__, __LINE__, opts.filename));
-					continue;
-				}
-				
-				player->transportType = opts.common.transportType;
-				player->videoProgram.codec = opts.common.videoCodec;
-				player->videoPidChannel.pid = opts.common.videoPid;
-
-				DBG_APP(("transportType:%d, videoCodec:%d, videPid:%d\n", player->transportType, player->videoProgram.codec,  player->videoPidChannel.pid));
-			}
-		}
-
-		if(!av->avp->uiIfHdRun)
-			usleep(10000);
-	
-		if (last_video_pid == player->videoPidChannel.pid && last_transport_type == player->transportType && last_video_codec == player->videoProgram.codec)
-		{
-		       NEXUS_VideoDecoderStatus vstatus;
-
-			/*printf("last_video_pid:%d, last_transport_type:%d, last_video_codec:%d\n", last_video_pid, last_transport_type, last_video_codec);*/
-	              rc = NEXUS_VideoDecoder_GetStatus(player->videoDecoder, &vstatus);
-	              BDBG_ASSERT(!rc);
-
-			if (vstatus.started)
-			{
-				DBG_APP(("[%s-%d]video decoder started\n", __FUNCTION__, __LINE__));
-				NEXUS_VideoDecoder_Flush(player->videoDecoder);
-				NEXUS_Playpump_Flush(player->playpump);
-			}
-			else
-			{
-				DBG_APP(("[%s-%d]video decoder Not started\n", __FUNCTION__, __LINE__));
-				NEXUS_Playpump_GetDefaultOpenPidChannelSettings(&settings);
-				settings.pidType = NEXUS_PidType_eVideo;
-				player->videoPidChannel.pidChannel = NEXUS_Playpump_OpenPidChannel(player->playpump,player->videoPidChannel.pid, &settings);
-			
-				player->videoProgram.pidChannel = player->videoPidChannel.pidChannel;
-				player->videoProgram.stcChannel = player->stcChannel;
-				NEXUS_VideoDecoder_Start(player->videoDecoder, &player->videoProgram);
-			}
-			
-			/* send respone player ready to play */	
-			NEXUSAPP_Playpump_Respone(player->socketFd , CTRL_OSD_ERROR_NOTHING);
-
-			NEXUSAPP_Playpump_Static_Set(av->avp,player->playerId,PLAYER_CTRL_PLAY);
-			NEXUSAPP_Playpump_Play(av,player);
-			
-			NEXUS_VideoDecoder_Flush(player->videoDecoder);
-			NEXUS_Playpump_Flush(player->playpump);
-
-			/*	close my io */
-			if(player->ioContext.priv_data && av->avp->uiIfHdRun)
-			{
-				player->myIo->url_close(&player->ioContext);
-			}			
-		
-		}
-		else
-		{
-			NEXUS_PlaypumpSettings playpumpSettings;
-
-			DBG_APP(("[%d]last_video_pid:%d, current_video_pid:%d\n",  __LINE__, last_video_pid, player->videoPidChannel.pid));
-
-			NEXUS_VideoDecoder_Stop(player->videoDecoder);
-			player->decoderStart = false;
-			
-			NEXUS_Playpump_Stop(player->playpump);
-
-			NEXUS_Playpump_CloseAllPidChannels(player->playpump);
-
-			NEXUSAPP_Playpump_Static_Set(av->avp, player->playerId,PLAYER_CTRL_STOP);
-
-			NEXUS_Playpump_GetSettings(player->playpump, &playpumpSettings);
-			playpumpSettings.transportType = player->transportType;
-			playpumpSettings.dataCallback.callback = NEXUSAPP_Playpump_SD_Callback;
-			playpumpSettings.dataCallback.context = player->Event;
-			NEXUS_Playpump_SetSettings(player->playpump, &playpumpSettings);
-			NEXUS_Playpump_Start(player->playpump);
-			
-			NEXUS_Playpump_GetDefaultOpenPidChannelSettings(&settings);
-			settings.pidType = NEXUS_PidType_eVideo;
-			player->videoPidChannel.pidChannel = NEXUS_Playpump_OpenPidChannel(player->playpump,player->videoPidChannel.pid, &settings);
-			
-			last_video_pid = player->videoPidChannel.pid;
-			last_transport_type = player->transportType;
-			last_video_codec = player->videoProgram.codec;
-			player->videoProgram.pidChannel = player->videoPidChannel.pidChannel;
-			player->videoProgram.stcChannel = player->stcChannel;
-
-			NEXUS_VideoDecoder_Start(player->videoDecoder, &player->videoProgram);
-			player->decoderStart = true;
-		
-			NEXUSAPP_Playpump_Static_Set(av->avp, player->playerId,PLAYER_CTRL_PAUSE);
-
-			/* send respone player ready to play */
-			NEXUSAPP_Playpump_Respone(player->socketFd , CTRL_OSD_ERROR_NOTHING);
-
-			NEXUSAPP_Playpump_Static_Set(av->avp,player->playerId,PLAYER_CTRL_PLAY);
-			NEXUSAPP_Playpump_Play(av,player);
-			
-			NEXUS_Playpump_Flush(player->playpump);
-			NEXUS_VideoDecoder_Flush(player->videoDecoder);
-
-			/*	close my io */
-			if(player->ioContext.priv_data && av->avp->uiIfHdRun)
-			{
-				player->myIo->url_close(&player->ioContext);
-			}			
-		}
-
-	}
-	
-	av->avp->uiIfHdRun =false;
-	DBG_APP(("[%s-%d]SD playpump thread out!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!", __FUNCTION__, __LINE__));
-
-	return NULL;		
-}
 
 /*************************************************
   Function:    	NEUXSAPP_SystemFile_Creat
@@ -3071,7 +2967,6 @@ int HM_Nexus_Player_Init(av_playpump *avPlayer)
 	
 	int iPid = 0 , iErrorCount = 0;
 	pthread_t threadHd;
-	pthread_t threadSd;
 	pthread_t threadOsd;
 
 	pthread_attr_t attr;
@@ -3099,8 +2994,8 @@ int HM_Nexus_Player_Init(av_playpump *avPlayer)
 
 	NEXUSAPP_Platform_Init(avPlayer);
 	
-	err_code = NEXUSAPP_Security_Init();
-	if (err_code != HM_SECURITY_SUCC)
+	rc = NEXUSAPP_Security_Init();
+	if (rc != HM_SECURITY_SUCC)
 		return -1;
 
 	NEXUSAPP_SysTime_Setup();
@@ -3114,7 +3009,7 @@ int HM_Nexus_Player_Init(av_playpump *avPlayer)
 		return -1;
 	}
 
-	rmdisk_semid=sem_open("/rmdisk", O_RDWR);	
+	rmdisk_semid=sem_open("/rmdisk", O_RDWR);
 	if (SEM_FAILED == rmdisk_semid)
 	{
 		DBG_APP(("fail to get rmdisk sem\n"));
@@ -3127,6 +3022,48 @@ int HM_Nexus_Player_Init(av_playpump *avPlayer)
 		DBG_APP(("fail to get song searched sem\n"));
 		return -1;
 	}
+
+	song_finish_semid=sem_open("/songfinish", O_RDWR);	
+	if (SEM_FAILED == song_finish_semid)
+	{
+		DBG_APP(("fail to get song finished sem\n"));
+		return -1;
+	}
+
+#if 0
+	rc = sqlite3_open("/mnt/system/data/song_total.db", &db);
+	if (rc != SQLITE_OK)
+	{
+		printf("open sqlite database fail\n");
+	}
+#endif
+
+#if 0
+	rc = sqlite3_exec(db, "attach 'song_total.db' as song_total", NULL, 0, 0);
+	if (rc != SQLITE_OK)
+	{
+		printf("[%s-%d]sqlite3_exec fail\n", __FUNCTION__, __LINE__);
+	}
+#endif
+
+#if 0
+	rc = sqlite3_get_table(db, "select * from SONG",  &selectResult, &nResult, &mResult, 0);
+	if (rc != SQLITE_OK)
+	{
+		printf("[%s-%d]sqlite3_exec fail\n", __FUNCTION__, __LINE__);
+	}
+
+	if(nResult > 0)
+	{
+		printf("nResult:%d\n", nResult);
+	}
+
+	rc = sqlite3_close(db);
+	if (rc != SQLITE_OK)
+	{
+		printf("sqlite database close fail\n");
+	}
+#endif
 
 	NEXUSAPP_SystemInfo_Init(avPlayer);
 
@@ -3151,7 +3088,6 @@ int HM_Nexus_Player_Init(av_playpump *avPlayer)
 	pthread_attr_destroy (&attr);
 
 	NEXUSAPP_DPlayer_Ready(avPlayer);
-
 
 /*  OSD THREAD */
 	pthread_attr_init (&attr);
@@ -3213,11 +3149,9 @@ api_error_out:
 	DBG_APP(("%s: Aplication destroy thread!\n",__FUNCTION__));
 	
 	pthread_kill(threadHd,SIGNAL_EXIT);
-	pthread_kill(threadSd,SIGNAL_EXIT);
 	pthread_kill(threadOsd,SIGNAL_EXIT);
 
 	pthread_join(threadHd,NULL);
-	pthread_join(threadSd,NULL);
 	pthread_join(threadOsd,NULL);
 
 	NEXUSAPP_SystemInfo_UnInit(avPlayer);
