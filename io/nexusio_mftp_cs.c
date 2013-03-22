@@ -28,143 +28,94 @@ char * strzcpy(char *d_str, const char *s_str, size_t s_max)
 /*****************************************************************************/
 int nexusio_socket_tcp_client_recv(sock_t sock, void *buff, int size, int opts)
 {
+	fd_set read_sets;
+	int iMaxFd , status;
+	unsigned long iRet = 0;
+	unsigned long iPos =0;
+	unsigned long iReadLen = 0;
 	char *pbuf = (char *)buff;
 
-	int vlen;
-	int vres = 0;
-	int vtry = 0;
+	if(sock <= 0)
+		return -1;
 
-	while(size > 0)
+	iReadLen = size;
+	
+	while(1)
 	{
-		vlen = recv(sock, pbuf, size, opts);
-
-		if(vlen < 0)
-			break;
-
-		if(vlen > 0)
+		FD_ZERO(&read_sets);
+		FD_SET(sock,&read_sets);
+		iMaxFd = sock + 1;
+		status = select(iMaxFd,&read_sets,NULL,NULL,NULL);
+		switch(status)
 		{
-			pbuf += vlen;
-			size -= vlen;
-			vres += vlen;
+		    case -1:
+			goto error_out;
+		    case 0:
+			continue;
+		    default:
+		        if(FD_ISSET(sock,&read_sets))
+		        {
+				iRet = recv(sock,pbuf+iPos,iReadLen,opts);
+				if(iRet <=0)
+				{
+					MSG_APP(("socket_tcp_recv: read error !\n"));
+					goto error_out;	
+				}
+			
+				if(iRet==iReadLen)
+					goto succ_out;
+				
+				if(iRet<iReadLen)
+				{
+					iPos+=iRet ; 
+					iReadLen -= iRet;
+					continue;
+				}
+		        }
+		        break;
+		}    
+		}	
 
-			vtry = 0;
-		}
-		else
-		if(vtry < 3)
-		{
-			struct timeval time_out;
-
-			time_out.tv_sec  = 1;
-			time_out.tv_usec = 0;
-
-			fd_set send_fds;
-			fd_set exce_fds;
-
-			FD_ZERO(&send_fds);
-			FD_ZERO(&exce_fds);
-
-			FD_SET(sock, &send_fds);
-			FD_SET(sock, &exce_fds);
-
-			if(select(sock + 1, NULL, &send_fds, &exce_fds, &time_out) < 0)
-			{
-				socklen_t size = 4;
-				socklen_t errn = 0;
-
-				if(getsockopt(sock, SOL_SOCKET, SO_ERROR, &errn, &size) < 0)
-					break;
-
-				if(EBADF == (-errn))
-					break;
-
-				vtry += 2;
-			}
-			else
-			{
-				if(FD_ISSET(sock, &send_fds) == 0)
-					break;
-
-				if(FD_ISSET(sock, &exce_fds) != 0)
-					break;
-
-				vtry += 1;
-			}
-		}
-		else
-			break;
-	};
-
-	return vres;
+succ_out:
+	return iPos + iRet;
+error_out:
+	MSG_APP(("socket_tcp_recv: select timeout\n"));
+	return -1;	
 }
 /*****************************************************************************/
 int nexusio_socket_tcp_client_send(sock_t sock, void *buff, int size, int opts)
 {
+	int ret, size1, fd_max, len;
+	fd_set wfds;
+	struct timeval tv;
 	char *pbuf = (char *)buff;
 
-	int vlen;
-	int vres = 0;
-	int vtry = 0;
-
-	while(size > 0)
+	if(sock<=0)
+		return -1;
+	
+	size1 = size;
+	while (size1 > 0) 
 	{
-		vlen = send(sock, pbuf, size, opts);
-
-		if(vlen < 0)
-			break;
-
-		if(vlen > 0)
+		fd_max = sock;
+		FD_ZERO(&wfds);
+		FD_SET(sock, &wfds);
+		tv.tv_sec = 0;
+		tv.tv_usec = 100 * 1000;
+		ret = select(fd_max + 1, NULL, &wfds, NULL, &tv);
+		if (ret > 0 && FD_ISSET(sock, &wfds)) 
 		{
-			pbuf += vlen;
-			size -= vlen;
-			vres += vlen;
+			len = send(sock, pbuf, size1,opts);
+			if (len < 0) 
+				return -1;
 
-			vtry = 0;
-		}
-		else if(vtry < 3)
-		{
-			struct timeval time_out;
+			size1 -= len;
+			pbuf += len;
+		} 
+		else if (ret < 0)
+			return -1;
 
-			time_out.tv_sec  = 1;
-			time_out.tv_usec = 0;
-
-			fd_set send_fds;
-			fd_set exce_fds;
-
-			FD_ZERO(&send_fds);
-			FD_ZERO(&exce_fds);
-
-			FD_SET(sock, &send_fds);
-			FD_SET(sock, &exce_fds);
-
-			if(select(sock + 1, NULL, &send_fds, &exce_fds, &time_out) < 0)
-			{
-				socklen_t size = 4;
-				socklen_t errn = 0;
-
-				if(getsockopt(sock, SOL_SOCKET, SO_ERROR, &errn, &size) < 0)
-					break;
-
-				if(EBADF == (-errn))
-					break;
-
-				vtry += 2;
-			}
-			else
-			{
-				if(FD_ISSET(sock, &send_fds) == 0)
-					break;
-
-				if(FD_ISSET(sock, &exce_fds) != 0)
-					break;
-
-				vtry += 1;
-			}
-		}
-		else
-			break;
-	};
-
-	return vres;
+	}
+	return size;	
 }
 /*****************************************************************************/
 int nexusio_socket_tcp_client_connect(sock_t *sock, void *addr, int wait)
@@ -321,7 +272,6 @@ int nexusio_mftp_udp_find_srvr(int  sock, SADDR *addrs, int *count)
 
 	if(sock >= 0)
 	{
-		
 		memset(&iaddr, 0, addrz = sizeof(iaddr));
 
 		iaddr.sin_family = AF_INET;
@@ -561,20 +511,13 @@ int nexusio_mftp_udp_save_file(int  sock, char *fname, void *fdata, int fsize)
 /*****************************************************************************/
 int nexusio_mftp_tcp_auto_cnnt(int *sock, SADDR *addrs, int count, char  clnt_code)
 {
-	int ii;
-	int iCount = 1;
-	struct sockaddr_in addr;
-	
-	memset(&addr , 0x00 , sizeof(struct sockaddr));
-
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(2004);
-	addr.sin_addr.s_addr = inet_addr("127.0.0.1");	
-
 	nexusio_socket_tcp_client_cleanup((sock_t *)sock);
-	for(ii = 0; ii < iCount; ii ++)
+
+	int ii;
+
+	for(ii = 0; ii < count; ii ++)
 	{
-		if(nexusio_socket_tcp_client_connect((sock_t *)sock, &addr, 5))
+		if(nexusio_socket_tcp_client_connect((sock_t *)sock, addrs + ii, 5))
 		{
 			char tmpbuff[4];
 

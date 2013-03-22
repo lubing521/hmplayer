@@ -192,7 +192,7 @@ void nexusio_mftp_pack_dex(nexusio_mftp_io *io_priv_data)
 
 /*****************************************************************************/
 
-static int nexusio_mftp_data_read(nexusio_mftp_io *io_priv_data, unsigned char *buf,  unsigned int len , unsigned int *readlen)
+static int nexusio_mftp_data_read(nexusio_mftp_io *io_priv_data, unsigned char *buf, int len)
 {
 
 	if(io_priv_data == NULL)
@@ -209,7 +209,6 @@ static int nexusio_mftp_data_read(nexusio_mftp_io *io_priv_data, unsigned char *
 
 	int res = 0;
 
-	*readlen = 0;
 
 READ_DATA:
 
@@ -219,9 +218,7 @@ READ_DATA:
 		io_priv_data->pck_posi += len;
 		io_priv_data->pck_size -= len;
 
-		*readlen += len;
-		
-		return 0;
+		return(res + len);
 	}
 	else
 	if(len > io_priv_data->pck_size)
@@ -230,17 +227,15 @@ READ_DATA:
 
 		buf += io_priv_data->pck_size;
 		len -= io_priv_data->pck_size;
-		*readlen += io_priv_data->pck_size;
+		res += io_priv_data->pck_size;
 
-		io_priv_data->pck_posi = 0;
-		io_priv_data->pck_size = 0;
-		
 		nexusio_mftp_watch_dog_enter(io_priv_data->mwd_numb);
 
-		res = nexusio_mftp_tcp_file_read(
+		io_priv_data->pck_posi = 0;
+		io_priv_data->pck_size = nexusio_mftp_tcp_file_read(
 		            io_priv_data->tcp_sock,
 		            io_priv_data->rmt_file,
-		            io_priv_data->pck_buff);
+		            io_priv_data->pck_buff);	
 
 		//DBG_IO(("read pkt size = %d , res = %d \n",(int)io_priv_data->pck_size , res));
 			
@@ -248,36 +243,31 @@ READ_DATA:
 
 		nexusio_mftp_pack_dex(io_priv_data);
 
-		if(res < 0)
+		if(io_priv_data->pck_size < 0)
 		{	
 			   io_priv_data->err_stat = 1;
 			   return 0;
 		}
 
-		if(res < 1)
+		if(io_priv_data->pck_size < 1)
 		{
-			if( *readlen > 0)
-				return 0;
+			if( res > 0)
+				return res;
 			else
 				return -1;
 		}
 
-		io_priv_data->pck_posi = 0;
-		io_priv_data->pck_size = res;
-		
 		goto READ_DATA;
 	}
 	else
 	{
-		memcpy(buf, io_priv_data->pck_buff + io_priv_data->pck_posi, len);
-		*readlen += len;
-
-		io_priv_data->pck_posi = 0;
-		io_priv_data->pck_size = 0;
+		memcpy(buf, io_priv_data->pck_buff +
+		            io_priv_data->pck_posi, len);
 
 		nexusio_mftp_watch_dog_enter(io_priv_data->mwd_numb);
 
-		res =  nexusio_mftp_tcp_file_read(
+		io_priv_data->pck_posi = 0;
+		io_priv_data->pck_size = nexusio_mftp_tcp_file_read(
 		            io_priv_data->tcp_sock,
 		            io_priv_data->rmt_file,
 		            io_priv_data->pck_buff);
@@ -286,17 +276,13 @@ READ_DATA:
 
 		nexusio_mftp_pack_dex(io_priv_data);
 
-		if( res < 0)
+		if(io_priv_data->pck_size < 0)
 		{
 			io_priv_data->err_stat = 1;
 			return 0;
 		}
 
-				
-		io_priv_data->pck_posi = 0;
-		io_priv_data->pck_size =  res;
-
-		return 0;
+		return(res + len);
 	}
 }
 
@@ -305,9 +291,6 @@ static void *nexusio_mftp_buff_recv(void *argp)
 {
 	nexusio_mftp_io *io_priv_data = (nexusio_mftp_io *)argp;
 	int i , iRet ;
-
-	unsigned int uiReadLen = 0;
-	unsigned long ulReadTotal = 0;
 	
 	if(io_priv_data == NULL)
 		return NULL;
@@ -338,20 +321,16 @@ static void *nexusio_mftp_buff_recv(void *argp)
 				
 				memset(&io_priv_data->buffer.data[i],0x00,sizeof(mftp_data));
 				
-				iRet = nexusio_mftp_data_read(io_priv_data,io_priv_data->buffer.data[i].szBuff,MFTP_BUFFER_DATA_MAX , &uiReadLen);
+				iRet = nexusio_mftp_data_read(io_priv_data,io_priv_data->buffer.data[i].szBuff,MFTP_BUFFER_DATA_MAX);
 				//DBG_IO(("nexusio_mftp_data_read : %d , size = %d , index = %d , err_stat = %d\n",uiReadLen,(int)io_priv_data->pck_size,io_priv_data->uiBufferIndex,io_priv_data->err_stat));
-				if(iRet == 0 )
+				if(iRet > 0 )
 				{
-					io_priv_data->buffer.data[i].ulPack_size = uiReadLen;
+					io_priv_data->buffer.data[i].ulPack_size = iRet;
 					io_priv_data->buffer.data[i].ulPack_pos = 0;
 					pthread_mutex_lock(&io_priv_data->buffer.data[i].v_mutex_lock);
 					io_priv_data->buffer.data[i].uiState = MFTP_BUFFER_DATA_STATE_READY;
-					io_priv_data->uiBufferTotal += uiReadLen;
+					io_priv_data->uiBufferTotal += iRet;
 					pthread_mutex_unlock(&io_priv_data->buffer.data[i].v_mutex_lock);
-
-					ulReadTotal += uiReadLen ;
-
-					//DBG_IO(("nexusio :nexusio_mftp_buff_recv read total = %ul , index =  %d\n" , ulReadTotal , i));
 				}
 				else
 				{
@@ -603,8 +582,7 @@ error_out:
 static int nexusio_mftp_file_read(nexusIoContext *h, unsigned char *buf, int len)
 {
 	int pos , size ;
-	int readlen = 0 , readpos = 0 , state;
-	unsigned int copylen = 0 ;
+	int readlen = 0 , readpos = 0 , copylen = 0 , state;
 	unsigned char *pData = NULL;
 	nexusio_mftp_io *io_priv_data = (nexusio_mftp_io *)h->priv_data;
 	
@@ -671,11 +649,7 @@ static int nexusio_mftp_file_read(nexusIoContext *h, unsigned char *buf, int len
 		readlen -= copylen;
 
 		pthread_mutex_lock(&io_priv_data->v_thread_mutex);
-		if(io_priv_data->uiBufferTotal < copylen)
-			io_priv_data->uiBufferTotal = 0;
-		else
-			io_priv_data->uiBufferTotal -= copylen;
-		
+		io_priv_data->uiBufferTotal -= readpos;
 		pthread_mutex_unlock(&io_priv_data->v_thread_mutex);
 
 		//DBG_IO(("nexusio_mftp_file_read Total =  %d \n",io_priv_data->uiBufferTotal));
@@ -700,12 +674,9 @@ static int nexusio_mftp_file_read(nexusIoContext *h, unsigned char *buf, int len
 
 	}
 
-	DBG_IO(("nexusio_mftp_file_read len = %d , get =%d , err_stat = %d , index = %d  \n",len,readpos,io_priv_data->err_stat , io_priv_data->uiBufferIndex));
+	DBG_IO(("nexusio_mftp_file_read len = %d , get =%d \n",len,readpos ));
 
-	if( readpos > 0)
-		return readpos;
-	
-	if(io_priv_data->err_stat ||  io_priv_data->uiBufferTotal <= 0)
+	if(io_priv_data->err_stat)
 		return 0;
 	
 	return -1;

@@ -6,6 +6,8 @@
 /*****************************************************************************/
 #include "nexusio_file_io.h"
 #include "nexusio_song_de.h"
+#include "nexusio_mftp_io.h"
+#include "../nexus_player.h"
 /*****************************************************************************/
 void nexusio_file_ext(char *dstr, const char *sstr)
 {
@@ -218,6 +220,11 @@ static int64_t  nexusio_file_seek(nexusIoContext *h, int64_t pos, int whence)
 	if(io_priv_data->err_stat > 0)
 		return(0);
 
+	io_priv_data->pck_posi = 0;
+	io_priv_data->pck_size = 0;
+
+	memset(io_priv_data->pck_buff,0x00,sizeof(io_priv_data->pck_buff));
+	
 	return fseek(io_priv_data->rmt_file,pos,whence);
 }	
 
