@@ -81,10 +81,10 @@ typedef struct
 	int mwd_numb;
 	int thread_state;
 
-	unsigned long pck_posi;
-	unsigned long pck_size;
+	long pck_posi;
+	long pck_size;
 	unsigned int uiBufferIndex;
-	unsigned int uiBufferTotal;
+	int uiBufferTotal;
 	mftp_buffer buffer;
 	char pck_buff[49152];
 
